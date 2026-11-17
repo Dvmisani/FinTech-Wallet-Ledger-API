@@ -57,8 +57,8 @@ public class TransferService
                 allowNegativeSource: true,
                 ct);
 
-            // Reload updated balance
-            await _db.Entry(wallet).ReloadAsync(ct);
+            var funded = await _db.Wallets.AsNoTracking().FirstAsync(w => w.Id == wallet.Id, ct);
+            return new WalletResponse(funded.Id, funded.OwnerName, funded.Currency, funded.Balance, funded.CreatedAtUtc);
         }
 
         return new WalletResponse(wallet.Id, wallet.OwnerName, wallet.Currency, wallet.Balance, wallet.CreatedAtUtc);
