@@ -1,4 +1,4 @@
-using FinTechWallet.Api.Data;
+﻿using FinTechWallet.Api.Data;
 using FinTechWallet.Api.Domain;
 using FinTechWallet.Api.DTOs;
 using Microsoft.EntityFrameworkCore;
@@ -93,16 +93,30 @@ public class TransferService
             .Where(e => e.WalletId == walletId)
             .Include(e => e.Transaction)
                 .ThenInclude(t => t.Entries)
-                    .ThenInclude(te => te.Wallet)
             .OrderByDescending(e => e.Transaction.CreatedAtUtc)
             .Take(50)
             .ToListAsync(ct);
 
+        var counterpartyIds = entries
+            .SelectMany(e => e.Transaction.Entries)
+            .Select(te => te.WalletId)
+            .Where(id => id != walletId)
+            .Distinct()
+            .ToList();
+
+        var walletNames = await _db.Wallets
+            .AsNoTracking()
+            .Where(w => counterpartyIds.Contains(w.Id))
+            .ToDictionaryAsync(w => w.Id, w => w.OwnerName, ct);
+
         return entries.Select(e =>
         {
-            var counterparty = e.Transaction.Entries
-                .FirstOrDefault(other => other.WalletId != walletId)?.Wallet?.OwnerName
-                ?? "System Settlement Treasury";
+            var counterpartyId = e.Transaction.Entries
+                .FirstOrDefault(other => other.WalletId != walletId)?.WalletId ?? Guid.Empty;
+
+            var counterparty = walletNames.TryGetValue(counterpartyId, out var name)
+                ? name
+                : "System Settlement Treasury";
 
             return new LedgerEntryResponse(
                 e.Id,
