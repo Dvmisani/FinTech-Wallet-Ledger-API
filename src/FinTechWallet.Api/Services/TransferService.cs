@@ -111,87 +111,93 @@ public class TransferService
         var firstId = sourceWalletId.CompareTo(destinationWalletId) < 0 ? sourceWalletId : destinationWalletId;
         var secondId = firstId == sourceWalletId ? destinationWalletId : sourceWalletId;
 
-        await using var tx = await _db.Database.BeginTransactionAsync(ct);
-
-        try
+        var strategy = _db.Database.CreateExecutionStrategy();
+        return await strategy.ExecuteAsync(async () =>
         {
-            // Acquire pessimistic row-level update locks on both wallets
-            var lockedWallets = await _db.Wallets
-                .FromSqlRaw(
-                    "SELECT * FROM Wallets WITH (UPDLOCK, ROWLOCK) WHERE Id IN ({0}, {1}) ORDER BY Id",
-                    firstId,
-                    secondId)
-                .ToListAsync(ct);
-
-            var source = lockedWallets.FirstOrDefault(w => w.Id == sourceWalletId)
-                ?? throw new TransferException($"Source wallet '{sourceWalletId}' was not found.", 404);
-
-            var destination = lockedWallets.FirstOrDefault(w => w.Id == destinationWalletId)
-                ?? throw new TransferException($"Destination wallet '{destinationWalletId}' was not found.", 404);
-
-            if (!string.Equals(source.Currency, destination.Currency, StringComparison.OrdinalIgnoreCase))
-                throw new TransferException("Cross-currency transfers are not supported.", 400);
-
-            if (!allowNegativeSource && source.Balance < amount)
-                throw new TransferException("Insufficient funds.", 422);
-
-            var ledgerTx = new LedgerTransaction
-            {
-                IdempotencyKey = idempotencyKey,
-                Description = string.IsNullOrWhiteSpace(description) ? "Wallet transfer" : description.Trim()
-            };
-
-            var debitEntry = new LedgerEntry
-            {
-                TransactionId = ledgerTx.Id,
-                WalletId = source.Id,
-                Type = EntryType.Debit,
-                Amount = amount
-            };
-
-            var creditEntry = new LedgerEntry
-            {
-                TransactionId = ledgerTx.Id,
-                WalletId = destination.Id,
-                Type = EntryType.Credit,
-                Amount = amount
-            };
-
-            source.Balance -= amount;
-            destination.Balance += amount;
-
-            _db.LedgerTransactions.Add(ledgerTx);
-            _db.LedgerEntries.AddRange(debitEntry, creditEntry);
-
-            await _db.SaveChangesAsync(ct);
-            await tx.CommitAsync(ct);
-
-            return new TransferResponse(
-                ledgerTx.Id,
-                ledgerTx.IdempotencyKey,
-                source.Id,
-                destination.Id,
-                amount,
-                ledgerTx.Description,
-                ledgerTx.CreatedAtUtc);
-        }
-        catch (DbUpdateException)
-        {
-            // Handles concurrent duplicate IdempotencyKey race conditions cleanly
-            await tx.RollbackAsync(ct);
             _db.ChangeTracker.Clear();
 
-            var duplicate = await GetExistingTransactionAsync(idempotencyKey, ct);
-            if (duplicate is not null)
-                return duplicate;
+            await using var tx = await _db.Database.BeginTransactionAsync(ct);
 
-            throw;
-        }
-        catch
-        {
-            await tx.RollbackAsync(ct);
-            throw;
-        }
+            try
+            {
+                // Acquire pessimistic row-level update locks on both wallets
+                var lockedWallets = await _db.Wallets
+                    .FromSqlRaw(
+                        "SELECT * FROM Wallets WITH (UPDLOCK, ROWLOCK) WHERE Id IN ({0}, {1}) ORDER BY Id",
+                        firstId,
+                        secondId)
+                    .ToListAsync(ct);
+
+                var source = lockedWallets.FirstOrDefault(w => w.Id == sourceWalletId)
+                    ?? throw new TransferException($"Source wallet '{sourceWalletId}' was not found.", 404);
+
+                var destination = lockedWallets.FirstOrDefault(w => w.Id == destinationWalletId)
+                    ?? throw new TransferException($"Destination wallet '{destinationWalletId}' was not found.", 404);
+
+                if (!string.Equals(source.Currency, destination.Currency, StringComparison.OrdinalIgnoreCase))
+                    throw new TransferException("Cross-currency transfers are not supported.", 400);
+
+                if (!allowNegativeSource && source.Balance < amount)
+                    throw new TransferException("Insufficient funds.", 422);
+
+                var ledgerTx = new LedgerTransaction
+                {
+                    IdempotencyKey = idempotencyKey,
+                    Description = string.IsNullOrWhiteSpace(description) ? "Wallet transfer" : description.Trim()
+                };
+
+                var debitEntry = new LedgerEntry
+                {
+                    TransactionId = ledgerTx.Id,
+                    WalletId = source.Id,
+                    Type = EntryType.Debit,
+                    Amount = amount
+                };
+
+                var creditEntry = new LedgerEntry
+                {
+                    TransactionId = ledgerTx.Id,
+                    WalletId = destination.Id,
+                    Type = EntryType.Credit,
+                    Amount = amount
+                };
+
+                source.Balance -= amount;
+                destination.Balance += amount;
+
+                _db.LedgerTransactions.Add(ledgerTx);
+                _db.LedgerEntries.AddRange(debitEntry, creditEntry);
+
+                await _db.SaveChangesAsync(ct);
+                await tx.CommitAsync(ct);
+
+                return new TransferResponse(
+                    ledgerTx.Id,
+                    ledgerTx.IdempotencyKey,
+                    source.Id,
+                    destination.Id,
+                    amount,
+                    ledgerTx.Description,
+                    ledgerTx.CreatedAtUtc);
+            }
+            catch (DbUpdateException)
+            {
+                // Handles concurrent duplicate IdempotencyKey race conditions cleanly
+                await tx.RollbackAsync(ct);
+                _db.ChangeTracker.Clear();
+
+                var duplicate = await GetExistingTransactionAsync(idempotencyKey, ct);
+                if (duplicate is not null)
+                    return duplicate;
+
+                throw;
+            }
+            catch
+            {
+                await tx.RollbackAsync(ct);
+                throw;
+            }
+        });
     }
 
     private async Task<TransferResponse?> GetExistingTransactionAsync(string idempotencyKey, CancellationToken ct)
