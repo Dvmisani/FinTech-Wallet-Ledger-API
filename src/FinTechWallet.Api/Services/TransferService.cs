@@ -88,18 +88,17 @@ public class TransferService
         if (!walletExists)
             return null;
 
-        var entries = await _db.LedgerEntries
+        var transactions = await _db.LedgerTransactions
             .AsNoTracking()
-            .Where(e => e.WalletId == walletId)
-            .Include(e => e.Transaction)
-                .ThenInclude(t => t.Entries)
-            .OrderByDescending(e => e.Transaction.CreatedAtUtc)
+            .Include(t => t.Entries)
+            .Where(t => t.Entries.Any(e => e.WalletId == walletId))
+            .OrderByDescending(t => t.CreatedAtUtc)
             .Take(50)
             .ToListAsync(ct);
 
-        var counterpartyIds = entries
-            .SelectMany(e => e.Transaction.Entries)
-            .Select(te => te.WalletId)
+        var counterpartyIds = transactions
+            .SelectMany(t => t.Entries)
+            .Select(e => e.WalletId)
             .Where(id => id != walletId)
             .Distinct()
             .ToList();
@@ -109,24 +108,26 @@ public class TransferService
             .Where(w => counterpartyIds.Contains(w.Id))
             .ToDictionaryAsync(w => w.Id, w => w.OwnerName, ct);
 
-        return entries.Select(e =>
+        return transactions.SelectMany(t =>
         {
-            var counterpartyId = e.Transaction.Entries
+            var counterpartyId = t.Entries
                 .FirstOrDefault(other => other.WalletId != walletId)?.WalletId ?? Guid.Empty;
 
             var counterparty = walletNames.TryGetValue(counterpartyId, out var name)
                 ? name
                 : "System Settlement Treasury";
 
-            return new LedgerEntryResponse(
-                e.Id,
-                e.TransactionId,
-                e.Transaction.IdempotencyKey,
-                e.Type.ToString(),
-                e.Amount,
-                counterparty,
-                e.Transaction.Description,
-                e.Transaction.CreatedAtUtc);
+            return t.Entries
+                .Where(e => e.WalletId == walletId)
+                .Select(e => new LedgerEntryResponse(
+                    e.Id,
+                    t.Id,
+                    t.IdempotencyKey,
+                    e.Type.ToString(),
+                    e.Amount,
+                    counterparty,
+                    t.Description,
+                    t.CreatedAtUtc));
         }).ToList();
     }
 
