@@ -1,4 +1,4 @@
-﻿using FinTechWallet.Api.Data;
+using FinTechWallet.Api.Data;
 using FinTechWallet.Api.Domain;
 using FinTechWallet.Api.DTOs;
 using Microsoft.EntityFrameworkCore;
@@ -80,6 +80,40 @@ public class TransferService
             .OrderByDescending(w => w.CreatedAtUtc)
             .Select(w => new WalletResponse(w.Id, w.OwnerName, w.Currency, w.Balance, w.CreatedAtUtc))
             .ToListAsync(ct);
+    }
+
+    public async Task<IReadOnlyList<LedgerEntryResponse>?> GetWalletTransactionsAsync(Guid walletId, CancellationToken ct = default)
+    {
+        var walletExists = await _db.Wallets.AsNoTracking().AnyAsync(w => w.Id == walletId, ct);
+        if (!walletExists)
+            return null;
+
+        var entries = await _db.LedgerEntries
+            .AsNoTracking()
+            .Where(e => e.WalletId == walletId)
+            .Include(e => e.Transaction)
+                .ThenInclude(t => t.Entries)
+                    .ThenInclude(te => te.Wallet)
+            .OrderByDescending(e => e.Transaction.CreatedAtUtc)
+            .Take(50)
+            .ToListAsync(ct);
+
+        return entries.Select(e =>
+        {
+            var counterparty = e.Transaction.Entries
+                .FirstOrDefault(other => other.WalletId != walletId)?.Wallet?.OwnerName
+                ?? "System Settlement Treasury";
+
+            return new LedgerEntryResponse(
+                e.Id,
+                e.TransactionId,
+                e.Transaction.IdempotencyKey,
+                e.Type.ToString(),
+                e.Amount,
+                counterparty,
+                e.Transaction.Description,
+                e.Transaction.CreatedAtUtc);
+        }).ToList();
     }
 
     public async Task<TransferResponse> TransferAsync(TransferRequest request, string idempotencyKey, CancellationToken ct = default)

@@ -42,4 +42,11 @@ public class WalletsController : ControllerBase
         var wallet = await _transferService.GetWalletAsync(id, ct);
         return wallet is null ? NotFound(new { error = "Wallet not found." }) : Ok(wallet);
     }
+
+    [HttpGet("{id:guid}/transactions")]
+    public async Task<ActionResult<IReadOnlyList<LedgerEntryResponse>>> GetWalletTransactions(Guid id, CancellationToken ct)
+    {
+        var entries = await _transferService.GetWalletTransactionsAsync(id, ct);
+        return entries is null ? NotFound(new { error = "Wallet not found." }) : Ok(entries);
+    }
 }

@@ -25,7 +25,7 @@
     .nav-links a { color: var(--accent); text-decoration: none; font-size: 0.9rem; margin-left: 16px; font-weight: 500; }
     .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 20px; margin-bottom: 24px; }
     .card { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 20px; }
-    .card h2 { margin-top: 0; font-size: 1.1rem; margin-bottom: 16px; }
+    .card h2 { margin-top: 0; font-size: 1.1rem; margin-bottom: 16px; display: flex; justify-content: space-between; align-items: center; }
     label { display: block; font-size: 0.85rem; color: var(--muted); margin-bottom: 6px; }
     input, select { width: 100%; padding: 10px 12px; border-radius: 8px; border: 1px solid var(--border); background: var(--input-bg); color: var(--text); margin-bottom: 14px; font-size: 0.95rem; }
     button { width: 100%; padding: 11px; border: none; border-radius: 8px; background: var(--accent); color: #052e16; font-weight: 700; font-size: 0.95rem; cursor: pointer; transition: background 0.15s; }
@@ -35,13 +35,16 @@
     .banner.ok { display: block; background: rgba(16, 185, 129, 0.15); border: 1px solid var(--accent); color: #6ee7b7; }
     .banner.err { display: block; background: rgba(239, 68, 68, 0.15); border: 1px solid var(--danger); color: #fca5a5; }
     .wallet-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 14px; }
-    .wallet-item { background: var(--input-bg); border: 1px solid var(--border); border-radius: 10px; padding: 14px; }
+    .wallet-item { background: var(--input-bg); border: 1px solid var(--border); border-radius: 10px; padding: 14px; cursor: pointer; transition: border-color 0.15s; }
+    .wallet-item:hover, .wallet-item.active { border-color: var(--accent); }
     .wallet-owner { font-weight: 600; font-size: 1rem; }
     .wallet-balance { font-size: 1.35rem; font-weight: 700; color: var(--accent); margin: 6px 0; }
     .wallet-meta { font-size: 0.78rem; color: var(--muted); }
-    .receipt-list { list-style: none; padding: 0; margin: 0; }
-    .receipt-list li { padding: 10px 0; border-bottom: 1px solid var(--border); font-size: 0.9rem; display: flex; justify-content: space-between; gap: 12px; }
-    .receipt-list li:last-child { border-bottom: none; }
+    .ledger-table { width: 100%; border-collapse: collapse; font-size: 0.9rem; }
+    .ledger-table th, .ledger-table td { text-align: left; padding: 10px 8px; border-bottom: 1px solid var(--border); }
+    .ledger-table th { color: var(--muted); font-weight: 600; font-size: 0.8rem; text-transform: uppercase; }
+    .badge-credit { color: #34d399; font-weight: 700; }
+    .badge-debit { color: #f87171; font-weight: 700; }
   </style>
 </head>
 <body>
@@ -101,23 +104,24 @@
     </div>
 
     <div class="card" style="margin-bottom: 24px;">
-      <h2>Active Customer Wallets</h2>
+      <h2><span>Active Customer Wallets</span><span class="wallet-meta">Click a wallet to inspect its ledger entries</span></h2>
       <div id="walletList" class="wallet-list">
         <div class="wallet-meta">Loading wallets...</div>
       </div>
     </div>
 
     <div class="card">
-      <h2>Session Transfer Receipts</h2>
-      <ul id="receiptList" class="receipt-list">
-        <li class="wallet-meta">No transfers submitted in this browser session yet.</li>
-      </ul>
+      <h2>
+        <span id="ledgerTitle">Persistent Double-Entry Ledger Statement</span>
+        <select id="ledgerWalletSelect" style="width: auto; margin: 0; padding: 6px 10px; font-size: 0.85rem;"></select>
+      </h2>
+      <div id="ledgerContainer" class="wallet-meta">Select a wallet to view its persisted ledger entries.</div>
     </div>
   </div>
 
   <script>
     let wallets = [];
-    const receipts = [];
+    let selectedLedgerWalletId = "";
 
     function showBanner(msg, isError = false) {
       const el = document.getElementById("banner");
@@ -129,12 +133,22 @@
       return `${currency} ${Number(amount).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
     }
 
+    function escapeHtml(str) {
+      return String(str).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+    }
+
     async function loadWallets() {
       try {
         const res = await fetch("/api/wallets");
         if (!res.ok) throw new Error("Failed to load wallets.");
         wallets = await res.json();
+        if (!selectedLedgerWalletId && wallets.length > 0) {
+          selectedLedgerWalletId = wallets[0].id;
+        }
         renderWallets();
+        if (selectedLedgerWalletId) {
+          await loadLedger(selectedLedgerWalletId);
+        }
       } catch (err) {
         showBanner(err.message, true);
       }
@@ -144,6 +158,7 @@
       const listEl = document.getElementById("walletList");
       const srcEl = document.getElementById("sourceWallet");
       const dstEl = document.getElementById("destWallet");
+      const ledgerSel = document.getElementById("ledgerWalletSelect");
 
       const prevSrc = srcEl.value;
       const prevDst = dstEl.value;
@@ -152,11 +167,12 @@
         listEl.innerHTML = `<div class="wallet-meta">No wallets yet. Create two wallets above to test transfers.</div>`;
         srcEl.innerHTML = `<option value="">-- Create a wallet first --</option>`;
         dstEl.innerHTML = `<option value="">-- Create a wallet first --</option>`;
+        ledgerSel.innerHTML = `<option value="">-- No wallets --</option>`;
         return;
       }
 
       listEl.innerHTML = wallets.map(w => `
-        <div class="wallet-item">
+        <div class="wallet-item ${w.id === selectedLedgerWalletId ? "active" : ""}" onclick="selectLedgerWallet('${w.id}')">
           <div class="wallet-owner">${escapeHtml(w.ownerName)}</div>
           <div class="wallet-balance">${formatMoney(w.balance, w.currency)}</div>
           <div class="wallet-meta">ID: ${w.id.slice(0, 8)}... &bull; Opened ${new Date(w.createdAtUtc).toLocaleDateString()}</div>
@@ -169,6 +185,9 @@
 
       srcEl.innerHTML = options;
       dstEl.innerHTML = options;
+      ledgerSel.innerHTML = wallets.map(w =>
+        `<option value="${w.id}">${escapeHtml(w.ownerName)}</option>`
+      ).join("");
 
       if (prevSrc && wallets.some(w => w.id === prevSrc)) srcEl.value = prevSrc;
       if (prevDst && wallets.some(w => w.id === prevDst)) {
@@ -176,11 +195,64 @@
       } else if (wallets.length > 1) {
         dstEl.selectedIndex = 1;
       }
+      if (selectedLedgerWalletId && wallets.some(w => w.id === selectedLedgerWalletId)) {
+        ledgerSel.value = selectedLedgerWalletId;
+      }
     }
 
-    function escapeHtml(str) {
-      return String(str).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+    async function selectLedgerWallet(id) {
+      selectedLedgerWalletId = id;
+      renderWallets();
+      await loadLedger(id);
     }
+
+    async function loadLedger(walletId) {
+      const container = document.getElementById("ledgerContainer");
+      const wallet = wallets.find(w => w.id === walletId);
+      const currency = wallet ? wallet.currency : "ZAR";
+
+      try {
+        const res = await fetch(`/api/wallets/${walletId}/transactions`);
+        if (!res.ok) throw new Error("Could not load ledger entries.");
+        const entries = await res.json();
+
+        if (entries.length === 0) {
+          container.innerHTML = `<div class="wallet-meta">No ledger entries recorded for this wallet yet.</div>`;
+          return;
+        }
+
+        container.innerHTML = `
+          <table class="ledger-table">
+            <thead>
+              <tr>
+                <th>Entry</th>
+                <th>Amount</th>
+                <th>Counterparty</th>
+                <th>Description</th>
+                <th>Timestamp (UTC)</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${entries.map(e => `
+                <tr>
+                  <td class="${e.type === "Credit" ? "badge-credit" : "badge-debit"}">${e.type.toUpperCase()}</td>
+                  <td>${e.type === "Credit" ? "+" : "-"}${formatMoney(e.amount, currency)}</td>
+                  <td>${escapeHtml(e.counterpartyName)}</td>
+                  <td>${escapeHtml(e.description)}</td>
+                  <td class="wallet-meta">${new Date(e.createdAtUtc).toLocaleString()}</td>
+                </tr>
+              `).join("")}
+            </tbody>
+          </table>
+        `;
+      } catch (err) {
+        container.innerHTML = `<div class="wallet-meta">${escapeHtml(err.message)}</div>`;
+      }
+    }
+
+    document.getElementById("ledgerWalletSelect").addEventListener("change", (e) => {
+      if (e.target.value) selectLedgerWallet(e.target.value);
+    });
 
     document.getElementById("createWalletForm").addEventListener("submit", async (e) => {
       e.preventDefault();
@@ -204,6 +276,7 @@
         if (!res.ok) throw new Error(data.error || "Could not create wallet.");
 
         document.getElementById("ownerName").value = "";
+        selectedLedgerWalletId = data.id;
         showBanner(`Wallet opened for ${data.ownerName} with ${formatMoney(data.balance, data.currency)}.`);
         await loadWallets();
       } catch (err) {
@@ -227,13 +300,11 @@
         if (!sourceWalletId || !destinationWalletId) throw new Error("Select both source and destination accounts.");
         if (sourceWalletId === destinationWalletId) throw new Error("Source and destination accounts must be different.");
 
-        const idempotencyKey = crypto.randomUUID();
-
         const res = await fetch("/api/transfers", {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
-            "Idempotency-Key": idempotencyKey
+            "Idempotency-Key": crypto.randomUUID()
           },
           body: JSON.stringify({ sourceWalletId, destinationWalletId, amount, description })
         });
@@ -245,15 +316,7 @@
         const dstName = wallets.find(w => w.id === destinationWalletId)?.ownerName || "Recipient";
         const currency = wallets.find(w => w.id === sourceWalletId)?.currency || "ZAR";
 
-        receipts.unshift({
-          text: `${srcName} → ${dstName}: ${formatMoney(data.amount, currency)} (${data.description})`,
-          meta: `Tx ${data.transactionId.slice(0, 8)}...`
-        });
-
-        document.getElementById("receiptList").innerHTML = receipts.map(r =>
-          `<li><span>${escapeHtml(r.text)}</span><span class="wallet-meta">${r.meta}</span></li>`
-        ).join("");
-
+        selectedLedgerWalletId = sourceWalletId;
         document.getElementById("amount").value = "";
         showBanner(`Sent ${formatMoney(data.amount, currency)} from ${srcName} to ${dstName}.`);
         await loadWallets();
