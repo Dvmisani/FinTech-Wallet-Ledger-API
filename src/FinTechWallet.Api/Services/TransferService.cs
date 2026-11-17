@@ -1,4 +1,4 @@
-using FinTechWallet.Api.Data;
+﻿using FinTechWallet.Api.Data;
 using FinTechWallet.Api.Domain;
 using FinTechWallet.Api.DTOs;
 using Microsoft.EntityFrameworkCore;
@@ -70,6 +70,16 @@ public class TransferService
         return wallet is null
             ? null
             : new WalletResponse(wallet.Id, wallet.OwnerName, wallet.Currency, wallet.Balance, wallet.CreatedAtUtc);
+    }
+
+    public async Task<IReadOnlyList<WalletResponse>> GetWalletsAsync(CancellationToken ct = default)
+    {
+        return await _db.Wallets
+            .AsNoTracking()
+            .Where(w => w.Id != SystemTreasuryWalletId)
+            .OrderByDescending(w => w.CreatedAtUtc)
+            .Select(w => new WalletResponse(w.Id, w.OwnerName, w.Currency, w.Balance, w.CreatedAtUtc))
+            .ToListAsync(ct);
     }
 
     public async Task<TransferResponse> TransferAsync(TransferRequest request, string idempotencyKey, CancellationToken ct = default)

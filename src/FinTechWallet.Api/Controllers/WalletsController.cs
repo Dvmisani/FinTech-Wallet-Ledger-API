@@ -15,6 +15,13 @@ public class WalletsController : ControllerBase
         _transferService = transferService;
     }
 
+    [HttpGet]
+    public async Task<ActionResult<IReadOnlyList<WalletResponse>>> GetWallets(CancellationToken ct)
+    {
+        var wallets = await _transferService.GetWalletsAsync(ct);
+        return Ok(wallets);
+    }
+
     [HttpPost]
     public async Task<ActionResult<WalletResponse>> CreateWallet([FromBody] CreateWalletRequest request, CancellationToken ct)
     {
