@@ -1,0 +1,8 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/FinTechWallet.Api/FinTechWallet.Api.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/FinTechWallet.IntegrationTests/FinTechWallet.IntegrationTests.csproj" />
+  </Folder>
+</Solution>
