@@ -1,4 +1,4 @@
-﻿using FinTechWallet.Api.Data;
+using FinTechWallet.Api.Data;
 using FinTechWallet.Api.Services;
 using Microsoft.EntityFrameworkCore;
 
@@ -13,7 +13,8 @@ var connectionString = builder.Configuration.GetConnectionString("DefaultConnect
     ?? throw new InvalidOperationException("Connection string 'DefaultConnection' not found.");
 
 builder.Services.AddDbContext<LedgerDbContext>(options =>
-    options.UseSqlServer(connectionString));
+    options.UseSqlServer(connectionString, sql =>
+        sql.EnableRetryOnFailure(maxRetryCount: 6, maxRetryDelay: TimeSpan.FromSeconds(15), errorNumbersToAdd: null)));
 
 builder.Services.AddScoped<TransferService>();
 
@@ -22,7 +23,15 @@ var app = builder.Build();
 using (var scope = app.Services.CreateScope())
 {
     var db = scope.ServiceProvider.GetRequiredService<LedgerDbContext>();
-    await db.Database.EnsureCreatedAsync();
+    var logger = scope.ServiceProvider.GetRequiredService<ILogger<Program>>();
+    try
+    {
+        await db.Database.EnsureCreatedAsync();
+    }
+    catch (Exception ex)
+    {
+        logger.LogError(ex, "Database initialization failed on startup.");
+    }
 }
 
 app.UseSwagger();
