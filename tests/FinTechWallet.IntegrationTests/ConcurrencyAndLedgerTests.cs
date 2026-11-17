@@ -133,6 +133,60 @@ public class ConcurrencyAndLedgerTests : IClassFixture<LedgerApiFactory>
         Assert.Equal(1000m, finalB.Balance);
     }
 
+    [Fact]
+    public async Task GetWalletTransactions_ShouldReturnBalancedDoubleEntryStatement()
+    {
+        var sender = await CreateWalletAsync("Sender Statement", 1000m);
+        var recipient = await CreateWalletAsync("Recipient Statement", 250m);
+
+        var transferRequest = new TransferRequest(
+            sender.Id,
+            recipient.Id,
+            300m,
+            "Monthly settlement");
+
+        using var message = new HttpRequestMessage(HttpMethod.Post, "/api/transfers")
+        {
+            Content = JsonContent.Create(transferRequest)
+        };
+        message.Headers.Add("Idempotency-Key", $"stmt-{Guid.NewGuid()}");
+
+        var transferResponse = await _client.SendAsync(message);
+        transferResponse.EnsureSuccessStatusCode();
+
+        // Verify sender statement shows initial deposit (Credit) + transfer (Debit)
+        var senderTxResponse = await _client.GetAsync($"/api/wallets/{sender.Id}/transactions");
+        senderTxResponse.EnsureSuccessStatusCode();
+        var senderEntries = await senderTxResponse.Content.ReadFromJsonAsync<List<LedgerEntryResponse>>();
+
+        Assert.NotNull(senderEntries);
+        Assert.Equal(2, senderEntries.Count);
+
+        var senderDebit = Assert.Single(senderEntries, e => e.Type == "Debit");
+        Assert.Equal(300m, senderDebit.Amount);
+        Assert.Equal("Recipient Statement", senderDebit.CounterpartyName);
+        Assert.Equal("Monthly settlement", senderDebit.Description);
+
+        var senderInitCredit = Assert.Single(senderEntries, e => e.Type == "Credit");
+        Assert.Equal(1000m, senderInitCredit.Amount);
+        Assert.Equal("System Settlement Treasury", senderInitCredit.CounterpartyName);
+
+        // Verify recipient statement shows initial deposit (Credit) + incoming transfer (Credit)
+        var recipientEntries = await _client.GetFromJsonAsync<List<LedgerEntryResponse>>(
+            $"/api/wallets/{recipient.Id}/transactions");
+
+        Assert.NotNull(recipientEntries);
+        Assert.Equal(2, recipientEntries.Count);
+        var incomingCredit = Assert.Single(recipientEntries, e => e.Description == "Monthly settlement");
+        Assert.Equal("Credit", incomingCredit.Type);
+        Assert.Equal(300m, incomingCredit.Amount);
+        Assert.Equal("Sender Statement", incomingCredit.CounterpartyName);
+
+        // Verify unknown wallet returns 404
+        var missingResponse = await _client.GetAsync($"/api/wallets/{Guid.NewGuid()}/transactions");
+        Assert.Equal(System.Net.HttpStatusCode.NotFound, missingResponse.StatusCode);
+    }
+
     private async Task<WalletResponse> CreateWalletAsync(string ownerName, decimal initialDeposit)
     {
         var response = await _client.PostAsJsonAsync("/api/wallets", new CreateWalletRequest(ownerName, "ZAR", initialDeposit));
