@@ -1,6 +1,6 @@
 # Enterprise FinTech Wallet & Double-Entry Ledger API
 
-[![Build & Concurrency Tests](https://github.com/dvmisani/FinTech-Wallet-Ledger-API/actions/workflows/azure-deploy.yml/badge.svg)](https://github.com/dvmisani/FinTech-Wallet-Ledger-API/actions/workflows/azure-deploy.yml)
+[![Build & Concurrency Tests](https://github.com/dvmisani/fintech-wallet-ledger-dvmisani/actions/workflows/azure-deploy.yml/badge.svg)](https://github.com/dvmisani/fintech-wallet-ledger-dvmisani/actions/workflows/azure-deploy.yml)
 
 A financial wallet and double-entry accounting ledger API built with **C# / .NET 10** and **Microsoft SQL Server**, engineered to enforce zero-sum ledger integrity, idempotent retries, and race-condition safety under concurrent load.
 
@@ -8,8 +8,8 @@ A financial wallet and double-entry accounting ledger API built with **C# / .NET
 
 ## Live Cloud Demo (Azure)
 
-* **Interactive Swagger UI:** `https://fintech-wallet-ledger-api.azurewebsites.net/swagger`
-* **Health Check:** `https://fintech-wallet-ledger-api.azurewebsites.net/health`
+* **Interactive Swagger UI:** `https://fintech-wallet-ledger-dvmisani.azurewebsites.net/swagger`
+* **Health Check:** `https://fintech-wallet-ledger-dvmisani.azurewebsites.net/health`
 
 ---
 
