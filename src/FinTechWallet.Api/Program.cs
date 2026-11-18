@@ -48,67 +48,22 @@ using (var scope = app.Services.CreateScope())
     try
     {
         await db.Database.EnsureCreatedAsync();
+        var ddlStatements = new[]
+        {
+            "IF COL_LENGTH('LedgerTransactions', 'RequestHash') IS NULL ALTER TABLE LedgerTransactions ADD RequestHash nvarchar(64) NOT NULL CONSTRAINT DF_LedgerTransactions_RequestHash DEFAULT '';",
+            "IF COL_LENGTH('LedgerTransactions', 'ReversedTransactionId') IS NULL ALTER TABLE LedgerTransactions ADD ReversedTransactionId uniqueidentifier NULL;",
+            "IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'IX_LedgerTransactions_ReversedTransactionId') CREATE UNIQUE INDEX IX_LedgerTransactions_ReversedTransactionId ON LedgerTransactions (ReversedTransactionId) WHERE ReversedTransactionId IS NOT NULL;",
+            "IF OBJECT_ID('OutboxMessages', 'U') IS NULL CREATE TABLE OutboxMessages (Id uniqueidentifier NOT NULL PRIMARY KEY, EventType nvarchar(100) NOT NULL, PayloadJson nvarchar(max) NOT NULL, CorrelationId nvarchar(64) NOT NULL, CreatedAtUtc datetime2 NOT NULL, PublishedAtUtc datetime2 NULL, DeadLetteredAtUtc datetime2 NULL, RetryCount int NOT NULL DEFAULT 0, LastError nvarchar(max) NULL);",
+            "IF COL_LENGTH('OutboxMessages', 'DeadLetteredAtUtc') IS NULL ALTER TABLE OutboxMessages ADD DeadLetteredAtUtc datetime2 NULL;",
+            "IF OBJECT_ID('FraudAlerts', 'U') IS NULL BEGIN CREATE TABLE FraudAlerts (Id uniqueidentifier NOT NULL PRIMARY KEY, TransactionId uniqueidentifier NOT NULL, SourceWalletId uniqueidentifier NOT NULL, DestinationWalletId uniqueidentifier NOT NULL, Amount decimal(19,4) NOT NULL, Currency nvarchar(3) NOT NULL, RuleTriggered nvarchar(80) NOT NULL, RiskScore int NOT NULL, Status nvarchar(30) NOT NULL, CorrelationId nvarchar(64) NOT NULL, CreatedAtUtc datetime2 NOT NULL); CREATE UNIQUE INDEX IX_FraudAlerts_TransactionId_RuleTriggered ON FraudAlerts (TransactionId, RuleTriggered); END;"
+        };
 
-        await db.Database.ExecuteSqlRawAsync("""
-            IF COL_LENGTH('LedgerTransactions', 'RequestHash') IS NULL
-                ALTER TABLE LedgerTransactions ADD RequestHash nvarchar(64) NOT NULL CONSTRAINT DF_LedgerTransactions_RequestHash DEFAULT '';
+        foreach (var ddl in ddlStatements)
+        {
+            await db.Database.ExecuteSqlRawAsync(ddl);
+        }
 
-            IF COL_LENGTH('LedgerTransactions', 'ReversedTransactionId') IS NULL
-                ALTER TABLE LedgerTransactions ADD ReversedTransactionId uniqueidentifier NULL;
-
-            IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'IX_LedgerTransactions_ReversedTransactionId')
-                CREATE UNIQUE INDEX IX_LedgerTransactions_ReversedTransactionId
-                ON LedgerTransactions (ReversedTransactionId)
-                WHERE ReversedTransactionId IS NOT NULL;
-
-            BEGIN TRY
-                ALTER TABLE Wallets ALTER COLUMN Balance decimal(19,4) NOT NULL;
-                ALTER TABLE LedgerEntries ALTER COLUMN Amount decimal(19,4) NOT NULL;
-            END TRY
-            BEGIN CATCH
-            END CATCH;
-
-            IF OBJECT_ID('OutboxMessages', 'U') IS NULL
-            BEGIN
-                CREATE TABLE OutboxMessages (
-                    Id uniqueidentifier NOT NULL PRIMARY KEY,
-                    EventType nvarchar(100) NOT NULL,
-                    PayloadJson nvarchar(max) NOT NULL,
-                    CorrelationId nvarchar(64) NOT NULL,
-                    CreatedAtUtc datetime2 NOT NULL,
-                    PublishedAtUtc datetime2 NULL,
-                    DeadLetteredAtUtc datetime2 NULL,
-                    RetryCount int NOT NULL DEFAULT 0,
-                    LastError nvarchar(max) NULL
-                );
-            END
-            ELSE IF COL_LENGTH('OutboxMessages', 'DeadLetteredAtUtc') IS NULL
-            BEGIN
-                ALTER TABLE OutboxMessages ADD DeadLetteredAtUtc datetime2 NULL;
-            END;
-
-            IF OBJECT_ID('FraudAlerts', 'U') IS NULL
-            BEGIN
-                CREATE TABLE FraudAlerts (
-                    Id uniqueidentifier NOT NULL PRIMARY KEY,
-                    TransactionId uniqueidentifier NOT NULL,
-                    SourceWalletId uniqueidentifier NOT NULL,
-                    DestinationWalletId uniqueidentifier NOT NULL,
-                    Amount decimal(19,4) NOT NULL,
-                    Currency nvarchar(3) NOT NULL,
-                    RuleTriggered nvarchar(80) NOT NULL,
-                    RiskScore int NOT NULL,
-                    Status nvarchar(30) NOT NULL,
-                    CorrelationId nvarchar(64) NOT NULL,
-                    CreatedAtUtc datetime2 NOT NULL
-                );
-                CREATE UNIQUE INDEX IX_FraudAlerts_TransactionId_RuleTriggered
-                ON FraudAlerts (TransactionId, RuleTriggered);
-            END;
-            """);
-
-        await db.Database.ExecuteSqlRawAsync("""
-            CREATE OR ALTER TRIGGER TR_LedgerEntries_AppendOnly
+        await db.Database.ExecuteSqlRawAsync("""            CREATE OR ALTER TRIGGER TR_LedgerEntries_AppendOnly
             ON LedgerEntries
             INSTEAD OF UPDATE, DELETE
             AS
@@ -177,4 +132,5 @@ app.MapHealthChecks("/health");
 app.Run();
 
 public partial class Program { }
+
 
