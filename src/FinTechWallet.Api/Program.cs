@@ -48,6 +48,7 @@ using (var scope = app.Services.CreateScope())
     try
     {
         await db.Database.EnsureCreatedAsync();
+
         var ddlStatements = new[]
         {
             "IF COL_LENGTH('LedgerTransactions', 'RequestHash') IS NULL ALTER TABLE LedgerTransactions ADD RequestHash nvarchar(64) NOT NULL CONSTRAINT DF_LedgerTransactions_RequestHash DEFAULT '';",
@@ -63,7 +64,8 @@ using (var scope = app.Services.CreateScope())
             await db.Database.ExecuteSqlRawAsync(ddl);
         }
 
-        await db.Database.ExecuteSqlRawAsync("""            CREATE OR ALTER TRIGGER TR_LedgerEntries_AppendOnly
+        await db.Database.ExecuteSqlRawAsync("""
+            CREATE OR ALTER TRIGGER TR_LedgerEntries_AppendOnly
             ON LedgerEntries
             INSTEAD OF UPDATE, DELETE
             AS
@@ -132,5 +134,3 @@ app.MapHealthChecks("/health");
 app.Run();
 
 public partial class Program { }
-
-
