@@ -1,4 +1,8 @@
-﻿using FinTechWallet.Api.Data;
+﻿using System.Globalization;
+using System.Security.Cryptography;
+using System.Text;
+using System.Text.Json;
+using FinTechWallet.Api.Data;
 using FinTechWallet.Api.Domain;
 using FinTechWallet.Api.DTOs;
 using Microsoft.EntityFrameworkCore;
@@ -17,7 +21,6 @@ public class TransferException : Exception
 
 public class TransferService
 {
-    // Well-known system settlement wallet so initial deposits also obey double-entry zero-sum rules
     public static readonly Guid SystemTreasuryWalletId = Guid.Parse("00000000-0000-0000-0000-000000000001");
 
     private readonly LedgerDbContext _db;
@@ -35,10 +38,17 @@ public class TransferService
         if (request.InitialDeposit < 0)
             throw new TransferException("Initial deposit cannot be negative.", 400);
 
+        var normalizedCurrency = string.IsNullOrWhiteSpace(request.Currency)
+            ? "ZAR"
+            : request.Currency.Trim().ToUpperInvariant();
+
+        if (normalizedCurrency.Length != 3)
+            throw new TransferException("Currency must be a 3-letter ISO code (e.g. ZAR).", 400);
+
         var wallet = new Wallet
         {
             OwnerName = request.OwnerName.Trim(),
-            Currency = string.IsNullOrWhiteSpace(request.Currency) ? "ZAR" : request.Currency.Trim().ToUpperInvariant(),
+            Currency = normalizedCurrency,
             Balance = 0m
         };
 
@@ -47,14 +57,16 @@ public class TransferService
 
         if (request.InitialDeposit > 0)
         {
-            await EnsureTreasuryWalletExistsAsync(wallet.Currency, ct);
+            var treasuryId = await EnsureTreasuryWalletExistsAsync(wallet.Currency, ct);
             await ExecuteTransferInternalAsync(
-                SystemTreasuryWalletId,
+                treasuryId,
                 wallet.Id,
                 request.InitialDeposit,
                 "Initial wallet funding",
                 $"init-{wallet.Id}",
+                reversedTransactionId: null,
                 allowNegativeSource: true,
+                correlationId: null,
                 ct);
 
             var funded = await _db.Wallets.AsNoTracking().FirstAsync(w => w.Id == wallet.Id, ct);
@@ -76,24 +88,32 @@ public class TransferService
     {
         return await _db.Wallets
             .AsNoTracking()
-            .Where(w => w.Id != SystemTreasuryWalletId)
+            .Where(w => !w.OwnerName.StartsWith("System Settlement Treasury"))
             .OrderByDescending(w => w.CreatedAtUtc)
             .Select(w => new WalletResponse(w.Id, w.OwnerName, w.Currency, w.Balance, w.CreatedAtUtc))
             .ToListAsync(ct);
     }
 
-    public async Task<IReadOnlyList<LedgerEntryResponse>?> GetWalletTransactionsAsync(Guid walletId, CancellationToken ct = default)
+    public async Task<IReadOnlyList<LedgerEntryResponse>?> GetWalletTransactionsAsync(
+        Guid walletId,
+        int page = 1,
+        int pageSize = 50,
+        CancellationToken ct = default)
     {
         var walletExists = await _db.Wallets.AsNoTracking().AnyAsync(w => w.Id == walletId, ct);
         if (!walletExists)
             return null;
+
+        var safePage = Math.Max(1, page);
+        var safePageSize = Math.Clamp(pageSize, 1, 100);
 
         var transactions = await _db.LedgerTransactions
             .AsNoTracking()
             .Include(t => t.Entries)
             .Where(t => t.Entries.Any(e => e.WalletId == walletId))
             .OrderByDescending(t => t.CreatedAtUtc)
-            .Take(50)
+            .Skip((safePage - 1) * safePageSize)
+            .Take(safePageSize)
             .ToListAsync(ct);
 
         var counterpartyIds = transactions
@@ -131,7 +151,11 @@ public class TransferService
         }).ToList();
     }
 
-    public async Task<TransferResponse> TransferAsync(TransferRequest request, string idempotencyKey, CancellationToken ct = default)
+    public async Task<TransferResponse> TransferAsync(
+        TransferRequest request,
+        string idempotencyKey,
+        string? correlationId = null,
+        CancellationToken ct = default)
     {
         if (string.IsNullOrWhiteSpace(idempotencyKey))
             throw new TransferException("Idempotency-Key header is required.", 400);
@@ -148,7 +172,49 @@ public class TransferService
             request.Amount,
             request.Description,
             idempotencyKey.Trim(),
+            reversedTransactionId: null,
             allowNegativeSource: false,
+            correlationId,
+            ct);
+    }
+
+    public async Task<TransferResponse> ReverseTransferAsync(
+        Guid transactionId,
+        string? correlationId = null,
+        CancellationToken ct = default)
+    {
+        var original = await _db.LedgerTransactions
+            .AsNoTracking()
+            .Include(t => t.Entries)
+            .FirstOrDefaultAsync(t => t.Id == transactionId, ct)
+            ?? throw new TransferException($"Transaction '{transactionId}' was not found.", 404);
+
+        if (original.ReversedTransactionId.HasValue)
+            throw new TransferException("Reversal transactions cannot themselves be reversed.", 400);
+
+        var alreadyReversed = await _db.LedgerTransactions
+            .AsNoTracking()
+            .AnyAsync(t => t.ReversedTransactionId == transactionId, ct);
+
+        if (alreadyReversed)
+            throw new TransferException($"Transaction '{transactionId}' has already been reversed.", 409);
+
+        var originalDebit = original.Entries.First(e => e.Type == EntryType.Debit);
+        var originalCredit = original.Entries.First(e => e.Type == EntryType.Credit);
+
+        if (original.IdempotencyKey.StartsWith("init-", StringComparison.Ordinal))
+            throw new TransferException("Initial system treasury funding cannot be reversed.", 400);
+
+        // Compensating transfer swaps source and destination without mutating existing ledger rows
+        return await ExecuteTransferInternalAsync(
+            sourceWalletId: originalCredit.WalletId,
+            destinationWalletId: originalDebit.WalletId,
+            amount: originalDebit.Amount,
+            description: $"Reversal of {original.Id}: {original.Description}",
+            idempotencyKey: $"rev-{original.Id}",
+            reversedTransactionId: original.Id,
+            allowNegativeSource: false,
+            correlationId,
             ct);
     }
 
@@ -158,15 +224,20 @@ public class TransferService
         decimal amount,
         string description,
         string idempotencyKey,
+        Guid? reversedTransactionId,
         bool allowNegativeSource,
+        string? correlationId,
         CancellationToken ct)
     {
-        // Fast-path idempotency check before acquiring locks
-        var existing = await GetExistingTransactionAsync(idempotencyKey, ct);
+        var normalizedDesc = string.IsNullOrWhiteSpace(description) ? "Wallet transfer" : description.Trim();
+        var requestHash = ComputeRequestHash(sourceWalletId, destinationWalletId, amount, normalizedDesc);
+
+        // Fast-path idempotency check with payload-hash verification
+        var existing = await GetExistingTransactionAsync(idempotencyKey, requestHash, ct);
         if (existing is not null)
             return existing;
 
-        // Sort IDs deterministically to prevent circular deadlocks under bidirectional concurrent transfers
+        // Deterministic sequential lock ordering guarantees SQL Server acquires row locks in identical order
         var firstId = sourceWalletId.CompareTo(destinationWalletId) < 0 ? sourceWalletId : destinationWalletId;
         var secondId = firstId == sourceWalletId ? destinationWalletId : sourceWalletId;
 
@@ -179,19 +250,22 @@ public class TransferService
 
             try
             {
-                // Acquire pessimistic row-level update locks on both wallets
-                var lockedWallets = await _db.Wallets
-                    .FromSqlRaw(
-                        "SELECT * FROM Wallets WITH (UPDLOCK, ROWLOCK) WHERE Id IN ({0}, {1}) ORDER BY Id",
-                        firstId,
-                        secondId)
-                    .ToListAsync(ct);
+                var firstLocked = await _db.Wallets
+                    .FromSqlRaw("SELECT * FROM Wallets WITH (UPDLOCK, ROWLOCK) WHERE Id = {0}", firstId)
+                    .FirstOrDefaultAsync(ct);
 
-                var source = lockedWallets.FirstOrDefault(w => w.Id == sourceWalletId)
-                    ?? throw new TransferException($"Source wallet '{sourceWalletId}' was not found.", 404);
+                var secondLocked = await _db.Wallets
+                    .FromSqlRaw("SELECT * FROM Wallets WITH (UPDLOCK, ROWLOCK) WHERE Id = {0}", secondId)
+                    .FirstOrDefaultAsync(ct);
 
-                var destination = lockedWallets.FirstOrDefault(w => w.Id == destinationWalletId)
-                    ?? throw new TransferException($"Destination wallet '{destinationWalletId}' was not found.", 404);
+                var source = firstId == sourceWalletId ? firstLocked : secondLocked;
+                var destination = firstId == destinationWalletId ? firstLocked : secondLocked;
+
+                if (source is null)
+                    throw new TransferException($"Source wallet '{sourceWalletId}' was not found.", 404);
+
+                if (destination is null)
+                    throw new TransferException($"Destination wallet '{destinationWalletId}' was not found.", 404);
 
                 if (!string.Equals(source.Currency, destination.Currency, StringComparison.OrdinalIgnoreCase))
                     throw new TransferException("Cross-currency transfers are not supported.", 400);
@@ -202,7 +276,9 @@ public class TransferService
                 var ledgerTx = new LedgerTransaction
                 {
                     IdempotencyKey = idempotencyKey,
-                    Description = string.IsNullOrWhiteSpace(description) ? "Wallet transfer" : description.Trim()
+                    RequestHash = requestHash,
+                    Description = normalizedDesc,
+                    ReversedTransactionId = reversedTransactionId
                 };
 
                 var debitEntry = new LedgerEntry
@@ -227,6 +303,25 @@ public class TransferService
                 _db.LedgerTransactions.Add(ledgerTx);
                 _db.LedgerEntries.AddRange(debitEntry, creditEntry);
 
+                // Transactional Outbox entry written atomically with ledger mutations
+                _db.OutboxMessages.Add(new OutboxMessage
+                {
+                    EventType = reversedTransactionId.HasValue ? "TransferReversedEvent" : "TransferCompletedEvent",
+                    CorrelationId = correlationId ?? Guid.NewGuid().ToString("N"),
+                    PayloadJson = JsonSerializer.Serialize(new
+                    {
+                        EventId = ledgerTx.Id,
+                        ledgerTx.IdempotencyKey,
+                        SourceWalletId = source.Id,
+                        DestinationWalletId = destination.Id,
+                        Amount = amount,
+                        Currency = source.Currency,
+                        Description = ledgerTx.Description,
+                        ReversedTransactionId = reversedTransactionId,
+                        OccurredAtUtc = ledgerTx.CreatedAtUtc
+                    })
+                });
+
                 await _db.SaveChangesAsync(ct);
                 await tx.CommitAsync(ct);
 
@@ -241,11 +336,11 @@ public class TransferService
             }
             catch (DbUpdateException)
             {
-                // Handles concurrent duplicate IdempotencyKey race conditions cleanly
                 await tx.RollbackAsync(ct);
                 _db.ChangeTracker.Clear();
 
-                var duplicate = await GetExistingTransactionAsync(idempotencyKey, ct);
+                // Simultaneous duplicate IdempotencyKey collision: return winner if payload matches, else 409
+                var duplicate = await GetExistingTransactionAsync(idempotencyKey, requestHash, ct);
                 if (duplicate is not null)
                     return duplicate;
 
@@ -259,7 +354,10 @@ public class TransferService
         });
     }
 
-    private async Task<TransferResponse?> GetExistingTransactionAsync(string idempotencyKey, CancellationToken ct)
+    private async Task<TransferResponse?> GetExistingTransactionAsync(
+        string idempotencyKey,
+        string expectedRequestHash,
+        CancellationToken ct)
     {
         var tx = await _db.LedgerTransactions
             .AsNoTracking()
@@ -268,6 +366,13 @@ public class TransferService
 
         if (tx is null)
             return null;
+
+        if (!string.Equals(tx.RequestHash, expectedRequestHash, StringComparison.Ordinal))
+        {
+            throw new TransferException(
+                "Idempotency-Key has already been used with a different transfer payload.",
+                409);
+        }
 
         var debit = tx.Entries.First(e => e.Type == EntryType.Debit);
         var credit = tx.Entries.First(e => e.Type == EntryType.Credit);
@@ -282,19 +387,48 @@ public class TransferService
             tx.CreatedAtUtc);
     }
 
-    private async Task EnsureTreasuryWalletExistsAsync(string currency, CancellationToken ct)
+    public static Guid GetTreasuryWalletId(string currency)
     {
-        var exists = await _db.Wallets.AnyAsync(w => w.Id == SystemTreasuryWalletId, ct);
+        if (string.Equals(currency, "ZAR", StringComparison.OrdinalIgnoreCase))
+            return SystemTreasuryWalletId;
+
+        var hash = SHA256.HashData(Encoding.UTF8.GetBytes($"TREASURY:{currency.ToUpperInvariant()}"));
+        return new Guid(hash.AsSpan(0, 16));
+    }
+
+    private async Task<Guid> EnsureTreasuryWalletExistsAsync(string currency, CancellationToken ct)
+    {
+        var treasuryId = GetTreasuryWalletId(currency);
+        var exists = await _db.Wallets.AnyAsync(w => w.Id == treasuryId, ct);
         if (!exists)
         {
             _db.Wallets.Add(new Wallet
             {
-                Id = SystemTreasuryWalletId,
-                OwnerName = "System Settlement Treasury",
+                Id = treasuryId,
+                OwnerName = $"System Settlement Treasury ({currency})",
                 Currency = currency,
                 Balance = 0m
             });
             await _db.SaveChangesAsync(ct);
         }
+        return treasuryId;
+    }
+
+    private static string ComputeRequestHash(
+        Guid sourceWalletId,
+        Guid destinationWalletId,
+        decimal amount,
+        string normalizedDescription)
+    {
+        var canonical = string.Join("|",
+            sourceWalletId.ToString("D"),
+            destinationWalletId.ToString("D"),
+            amount.ToString("0.0000", CultureInfo.InvariantCulture),
+            normalizedDescription);
+
+        var bytes = SHA256.HashData(Encoding.UTF8.GetBytes(canonical));
+        return Convert.ToHexString(bytes);
     }
 }
+
+

@@ -23,7 +23,23 @@ public class TransfersController : ControllerBase
     {
         try
         {
-            var result = await _transferService.TransferAsync(request, idempotencyKey ?? string.Empty, ct);
+            var correlationId = HttpContext.TraceIdentifier;
+            var result = await _transferService.TransferAsync(request, idempotencyKey ?? string.Empty, correlationId, ct);
+            return Ok(result);
+        }
+        catch (TransferException ex)
+        {
+            return StatusCode(ex.StatusCode, new { error = ex.Message });
+        }
+    }
+
+    [HttpPost("{id:guid}/reverse")]
+    public async Task<ActionResult<TransferResponse>> ReverseTransfer(Guid id, CancellationToken ct)
+    {
+        try
+        {
+            var correlationId = HttpContext.TraceIdentifier;
+            var result = await _transferService.ReverseTransferAsync(id, correlationId, ct);
             return Ok(result);
         }
         catch (TransferException ex)
