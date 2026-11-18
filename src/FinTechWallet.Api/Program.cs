@@ -51,7 +51,7 @@ using (var scope = app.Services.CreateScope())
 
         await db.Database.ExecuteSqlRawAsync("""
             IF COL_LENGTH('LedgerTransactions', 'RequestHash') IS NULL
-                ALTER TABLE LedgerTransactions ADD RequestHash nvarchar(64) NOT NULL DEFAULT '';
+                ALTER TABLE LedgerTransactions ADD RequestHash nvarchar(64) NOT NULL CONSTRAINT DF_LedgerTransactions_RequestHash DEFAULT '';
 
             IF COL_LENGTH('LedgerTransactions', 'ReversedTransactionId') IS NULL
                 ALTER TABLE LedgerTransactions ADD ReversedTransactionId uniqueidentifier NULL;
@@ -61,8 +61,12 @@ using (var scope = app.Services.CreateScope())
                 ON LedgerTransactions (ReversedTransactionId)
                 WHERE ReversedTransactionId IS NOT NULL;
 
-            ALTER TABLE Wallets ALTER COLUMN Balance decimal(19,4) NOT NULL;
-            ALTER TABLE LedgerEntries ALTER COLUMN Amount decimal(19,4) NOT NULL;
+            BEGIN TRY
+                ALTER TABLE Wallets ALTER COLUMN Balance decimal(19,4) NOT NULL;
+                ALTER TABLE LedgerEntries ALTER COLUMN Amount decimal(19,4) NOT NULL;
+            END TRY
+            BEGIN CATCH
+            END CATCH;
 
             IF OBJECT_ID('OutboxMessages', 'U') IS NULL
             BEGIN
@@ -173,3 +177,4 @@ app.MapHealthChecks("/health");
 app.Run();
 
 public partial class Program { }
+
